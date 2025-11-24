@@ -2,8 +2,8 @@ name: 'Upstream Sync'
 
 on:
   schedule:
-    - cron:  '*/30 * * * *'
-    # 每 30 分钟运行一次
+    - cron:  '* */24 * * *'
+
 
   workflow_dispatch:  # 在 Github 仓库中点击按钮！
     inputs:
