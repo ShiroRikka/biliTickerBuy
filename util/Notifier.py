@@ -38,7 +38,7 @@ class NotifierBase(ABC):
         self.interval_seconds = interval_seconds
         self.duration_minutes = duration_minutes
         self.stop_event = threading.Event()
-        self.thread = threading.Thread(target=self.run, daemon=False)
+        self.thread = threading.Thread(target=self.run, daemon=True)
 
     def run(self):
         """线程运行函数，实现间隔发送通知"""
@@ -67,7 +67,7 @@ class NotifierBase(ABC):
     def start(self):
         if not self.thread.is_alive():
             self.stop_event.clear()
-            self.thread = threading.Thread(target=self.run, daemon=False)
+            self.thread = threading.Thread(target=self.run, daemon=True)
             self.thread.start()
 
     def stop(self):
@@ -93,6 +93,7 @@ class NotifierConfig:
     ntfy_password: Optional[str] = None
     meow_nickname: Optional[str] = None
     audio_path: Optional[str] = None
+    notify_proxy_exhausted: bool = False
 
     @classmethod
     def from_config_db(cls):
@@ -109,6 +110,7 @@ class NotifierConfig:
             ntfy_password=ConfigDB.get("ntfyPassword"),
             meow_nickname=ConfigDB.get("meowNickname"),
             audio_path=ConfigDB.get("audioPath"),
+            notify_proxy_exhausted=bool(ConfigDB.get("notifyProxyExhausted") or False),
         )
 
 
