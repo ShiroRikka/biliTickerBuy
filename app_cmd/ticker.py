@@ -23,12 +23,12 @@ def shutdown_app_process(delay_seconds: float = 1.0) -> None:
 
 def ticker_cmd(args: Namespace):
     from tab.go import go_settings_tab, go_start_tab
-    from tab.log import log_tab, refresh_task_panel
+    from tab.log import log_tab, refresh_log_panel, refresh_task_panel
     from tab.problems import problems_tab
     from tab.settings import login_tab, setting_tab
     from tab.update import update_tab
     from util.log_web import attach_log_routes
-    from util import LOG_DIR
+    from util import ConfigDB, LOG_DIR
     from util.LogConfig import loguru_config
 
     loguru_config(LOG_DIR, "app.log", enable_console=True, file_colorize=False)
@@ -43,6 +43,9 @@ def ticker_cmd(args: Namespace):
             ).decode("ascii")
 
     app_version = get_app_version()
+    hide_header = ConfigDB.get("hideHeader")
+    if hide_header is None:
+        hide_header = False
 
     header = f"""
     <section class="btb-hero">
@@ -69,7 +72,7 @@ def ticker_cmd(args: Namespace):
 
     def refresh_all_task_panels():
         go_refresh_token, go_panel_update = refresh_task_panel()
-        log_refresh_token, log_panel_update = refresh_task_panel()
+        log_refresh_token, log_panel_update = refresh_log_panel()
         return (
             go_refresh_token,
             go_panel_update,
@@ -87,73 +90,36 @@ def ticker_cmd(args: Namespace):
         <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
         <script>
         (function(){
-            var TAB_ROUTE_MAP = {
-                login: 'btb-tab-login-button',
-                config: 'btb-tab-config-button',
-                go: 'btb-tab-go-button',
-                advanced: 'btb-tab-advanced-button',
-                guide: 'btb-tab-guide-button',
-                update: 'btb-tab-update-button',
-                logs: 'btb-tab-logs-button'
-            };
-            function normalizeTabHash() {
-                return (window.location.hash || '').replace(/^#\\/?/, '').trim();
+            function isMobileLike() {
+                return window.matchMedia('(max-width: 768px)').matches ||
+                    window.matchMedia('(pointer: coarse)').matches;
             }
-            function findSelectedTabKey() {
-                for (var key in TAB_ROUTE_MAP) {
-                    var button = document.getElementById(TAB_ROUTE_MAP[key]);
-                    if (button && button.getAttribute('aria-selected') === 'true') {
-                        return key;
-                    }
-                }
-                return '';
-            }
-            function syncHashToCurrentTab(useReplace) {
-                var key = findSelectedTabKey();
-                if (!key) return;
-                var nextHash = '#' + key;
-                if (window.location.hash === nextHash) return;
-                if (useReplace) {
-                    window.history.replaceState(null, '', nextHash);
-                } else {
-                    window.history.replaceState(null, '', nextHash);
-                }
-            }
-            function openTabFromHash() {
-                var key = normalizeTabHash();
-                if (!key || !TAB_ROUTE_MAP[key]) return false;
-                var button = document.getElementById(TAB_ROUTE_MAP[key]);
-                if (!button) return false;
-                if (button.getAttribute('aria-selected') !== 'true') {
-                    button.click();
-                }
-                return true;
-            }
-            function wireTabRouting() {
-                var tabsRoot = document.getElementById('btb-main-tabs');
-                if (!tabsRoot) {
-                    setTimeout(wireTabRouting, 250);
-                    return;
-                }
-                if (tabsRoot.dataset.routeBound === '1') {
-                    return;
-                }
-                tabsRoot.dataset.routeBound = '1';
-                Object.keys(TAB_ROUTE_MAP).forEach(function(key) {
-                    var button = document.getElementById(TAB_ROUTE_MAP[key]);
-                    if (!button) return;
-                    button.addEventListener('click', function() {
-                        window.history.replaceState(null, '', '#' + key);
-                    });
+            function enhanceDropdownNoKeyboard() {
+                if (!isMobileLike()) return;
+                var inputs = document.querySelectorAll(
+                    '.gradio-container [data-testid="dropdown"] input,' +
+                    '.gradio-container .gradio-dropdown input,' +
+                    '.gradio-container .dropdown input,' +
+                    '.gradio-container .choices input'
+                );
+                inputs.forEach(function(input) {
+                    if (input.dataset.mobileNoKeyboard === '1') return;
+                    input.dataset.mobileNoKeyboard = '1';
+                    input.readOnly = true;
+                    input.setAttribute('readonly', 'readonly');
+                    input.setAttribute('inputmode', 'none');
+                    input.setAttribute('autocomplete', 'off');
+                    input.setAttribute('autocorrect', 'off');
+                    input.setAttribute('autocapitalize', 'off');
+                    input.setAttribute('spellcheck', 'false');
                 });
-                setTimeout(function() {
-                    if (!openTabFromHash()) {
-                        syncHashToCurrentTab(true);
-                    }
-                }, 60);
-                window.addEventListener('hashchange', function() {
-                    setTimeout(openTabFromHash, 0);
+            }
+            function watchDropdownEnhance() {
+                enhanceDropdownNoKeyboard();
+                var observer = new MutationObserver(function() {
+                    enhanceDropdownNoKeyboard();
                 });
+                observer.observe(document.body, {childList: true, subtree: true});
             }
             function enhance(){
                 var root=document.getElementById('btb-time-start');
@@ -197,14 +163,14 @@ def ticker_cmd(args: Namespace):
                 });
             }
             if(document.readyState==='loading')
-                document.addEventListener('DOMContentLoaded',function(){enhance();wireTabRouting();});
-            else {setTimeout(enhance,500);setTimeout(wireTabRouting,300);}
+                document.addEventListener('DOMContentLoaded',function(){enhance();watchDropdownEnhance();});
+            else {setTimeout(enhance,500);setTimeout(watchDropdownEnhance,300);}
         })();
         </script>
         """,
     ) as demo:
         with gr.Column(elem_classes="btb-app-shell"):
-            gr.HTML(header)
+            header_ui = gr.HTML(header, visible=not hide_header)
             with gr.Tabs(elem_id="btb-main-tabs", elem_classes="btb-top-tabs"):
                 with gr.Tab("账号登录", id="login", elem_id="btb-tab-login"):
                     login_tab()
@@ -213,7 +179,7 @@ def ticker_cmd(args: Namespace):
                 with gr.Tab("操作抢票", id="go", elem_id="btb-tab-go"):
                     go_task_refresh_token, go_task_panel = go_start_tab()
                 with gr.Tab("高级设置", id="advanced", elem_id="btb-tab-advanced"):
-                    go_settings_tab()
+                    go_settings_tab(header_ui)
                 with gr.Tab("项目说明", id="guide", elem_id="btb-tab-guide"):
                     problems_tab()
                 with gr.Tab("软件更新", id="update", elem_id="btb-tab-update"):
@@ -238,6 +204,7 @@ def ticker_cmd(args: Namespace):
         server_name=args.server_name,
         server_port=args.port,
         prevent_thread_lock=True,
+        show_api=False,
     )
     attach_log_routes(demo.app)
     try:
