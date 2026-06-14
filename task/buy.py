@@ -15,13 +15,15 @@ from loguru import logger
 
 from requests import HTTPError, RequestException
 
-from util import ERRNO_DICT, time_service
+from util import time_service
 from util.Notifier import NotifierManager, NotifierConfig
 from util.ProxyBackoff import ProxyBackoff
 from util.BiliRequest import BiliRequest
 from util.ProxyManager import ProxyManager
 from util.RandomMessages import get_random_fail_message
 from util.CTokenUtil import CTokenGenerator
+from util.TokenUtil import generate_token
+from util.error_codes import ErrorCodes
 
 
 base_url = "https://show.bilibili.com"
@@ -105,15 +107,36 @@ def _wait_until_start(time_start: str):
 
 
 def _build_token_payload(tickets_info: dict) -> dict:
+    count = int(tickets_info["count"])
+    screen_id = int(tickets_info["screen_id"])
+    order_type = int(tickets_info.get("order_type", 1))
+    project_id = int(tickets_info["project_id"])
+    sku_id = int(tickets_info["sku_id"])
     return {
-        "count": tickets_info["count"],
-        "screen_id": tickets_info["screen_id"],
-        "order_type": 1,
-        "project_id": tickets_info["project_id"],
-        "sku_id": tickets_info["sku_id"],
-        "token": "",
+        "count": count,
+        "screen_id": screen_id,
+        "order_type": order_type,
+        "project_id": project_id,
+        "sku_id": sku_id,
+        "token": generate_token(
+            project_id=project_id,
+            screen_id=screen_id,
+            order_type=order_type,
+            count=count,
+            sku_id=sku_id,
+        ),
         "newRisk": True,
     }
+
+
+def _build_order_token(tickets_info: dict) -> str:
+    return generate_token(
+        project_id=int(tickets_info["project_id"]),
+        screen_id=int(tickets_info["screen_id"]),
+        order_type=int(tickets_info.get("order_type", 1)),
+        count=int(tickets_info["count"]),
+        sku_id=int(tickets_info["sku_id"]),
+    )
 
 
 def _build_order_payload(tickets_info: dict, token: str) -> dict:
@@ -135,6 +158,19 @@ def _is_create_success(ret: dict, err: int) -> bool:
 CREATE_RETRY_LIMIT = 60
 
 
+def _extract_response_message(ret: dict) -> str:
+    return str(ret.get("msg", ret.get("message", "")) or "").strip()
+
+
+def _append_response_message(err: int, base: str, ret: dict | None) -> str:
+    if not ErrorCodes.should_show_response_msg(err) or ret is None:
+        return base
+    message = _extract_response_message(ret)
+    if not message:
+        return base
+    return f"{base} | msg: {message}"
+
+
 def _format_retry_reason(
     err: int | None, ret: dict | None, exc: Exception | None
 ) -> str:
@@ -142,9 +178,10 @@ def _format_retry_reason(
         return f"最后一次异常: {exc}"
     if err is None:
         return "最后一次失败原因未知"
-    reason = ERRNO_DICT.get(err, "未知错误码")
+    reason = ErrorCodes.get_message_or_unknown(err)
     detail = ret if ret is not None else {}
-    return f"最后一次返回: [{err}]({reason}) | {detail}"
+    base = f"最后一次返回: [{err}]({reason}) | {detail}"
+    return _append_response_message(err, base, ret)
 
 
 def _summarize_non_json_response(prefix: str, diagnostic: str) -> str:
@@ -161,10 +198,10 @@ def _summarize_non_json_response(prefix: str, diagnostic: str) -> str:
 
 def _format_attempt_result(attempt: int, err: int, ret: dict) -> str:
     prefix = f"[{attempt}/{CREATE_RETRY_LIMIT}]"
-    reason = ERRNO_DICT.get(err)
+    reason = ErrorCodes.get_message(err)
     if reason:
-        return f"{prefix} [{err}] {reason}"
-    return f"{prefix} [{err}] 未知错误码 | {ret}"
+        return _append_response_message(err, f"{prefix} [{err}] {reason}", ret)
+    return _append_response_message(err, f"{prefix} [{err}] 未知错误码 | {ret}", ret)
 
 
 def _build_proxy_exhausted_message(_request: BiliRequest, delay_seconds: int) -> str:
@@ -221,10 +258,10 @@ def _handle_proxy_failure(
 
 def _format_status_result(prefix: str, ret: dict) -> str:
     err = int(ret.get("errno", ret.get("code", -1)))
-    reason = ERRNO_DICT.get(err)
+    reason = ErrorCodes.get_message(err)
     if reason:
-        return f"{prefix}: [{err}] {reason}"
-    message = str(ret.get("msg", ret.get("message", "")) or "")
+        return _append_response_message(err, f"{prefix}: [{err}] {reason}", ret)
+    message = _extract_response_message(ret)
     if message:
         return f"{prefix}: [{err}] {message}"
     return f"{prefix}: [{err}] {ret}"
@@ -368,35 +405,55 @@ def buy_stream(
 
     while isRunning:
         try:
-            yield emit("stage", "1）订单准备", stage="订单准备")
+            request_result: dict | None = None
             if is_hot_project:
+                yield emit("stage", "1）订单准备", stage="订单准备")
                 ctoken_generator = CTokenGenerator(time.time(), 0, randint(2000, 10000))
                 token_payload["token"] = ctoken_generator.generate_ctoken(
-                    is_create_v2=False
+                    for_create_stage=False
                 )
-            request_result_normal = _request.post(
-                url=f"{base_url}/api/ticket/order/prepare?project_id={tickets_info['project_id']}",
-                data=token_payload,
-                isJson=True,
-            )
-            try:
-                request_result = request_result_normal.json()
-            except JSONDecodeError:
-                diagnostic = _request.describe_non_json_response(request_result_normal)
-                summary = _summarize_non_json_response("订单准备接口", diagnostic)
-                if "412 风控" in summary:
-                    summary += f"（当前代理: {_request.current_proxy_display()}）"
-                    for message in emit_proxy_failure_messages("订单准备接口 412 风控"):
-                        yield message
+                request_result_normal = _request.post(
+                    url=f"{base_url}/api/ticket/order/prepare?project_id={tickets_info['project_id']}",
+                    data=token_payload,
+                    isJson=True,
+                )
+                try:
+                    request_result = request_result_normal.json()
+                except JSONDecodeError:
+                    diagnostic = _request.describe_non_json_response(
+                        request_result_normal
+                    )
+                    summary = _summarize_non_json_response("订单准备接口", diagnostic)
+                    if "412 风控" in summary:
+                        summary += f"（当前代理: {_request.current_proxy_display()}）"
+                        for message in emit_proxy_failure_messages(
+                            "订单准备接口 412 风控"
+                        ):
+                            yield message
+                    yield emit(
+                        "error",
+                        summary,
+                        current_proxy=_request.current_proxy_status(),
+                        proxy_pool=_request.proxy_pool_status(),
+                    )
+                    continue
+                proxy_backoff.reset()
                 yield emit(
-                    "error",
-                    summary,
-                    current_proxy=_request.current_proxy_status(),
-                    proxy_pool=_request.proxy_pool_status(),
+                    "status",
+                    _format_status_result(
+                        "订单准备结果",
+                        request_result,  # type: ignore
+                    ),
                 )
-                continue
-            proxy_backoff.reset()
-            yield emit("status", _format_status_result("订单准备结果", request_result))
+                order_token = request_result["data"]["token"]  # type: ignore
+            else:
+                yield emit(
+                    "status",
+                    None,
+                    stage="订单准备",
+                )
+                order_token = _build_order_token(tickets_info)
+
             yield emit(
                 "stage",
                 "2）创建订单",
@@ -404,9 +461,7 @@ def buy_stream(
                 attempt_current=None,
                 attempt_total=CREATE_RETRY_LIMIT,
             )
-            payload = _build_order_payload(
-                tickets_info, request_result["data"]["token"]
-            )
+            payload = _build_order_payload(tickets_info, order_token)
 
             result = None
             last_err: int | None = None
@@ -420,9 +475,11 @@ def buy_stream(
                     url = f"{base_url}/api/ticket/order/createV2?project_id={tickets_info['project_id']}"
                     if is_hot_project:
                         payload["ctoken"] = ctoken_generator.generate_ctoken(  # type: ignore
-                            is_create_v2=True
+                            for_create_stage=True
                         )
-                        ptoken = request_result["data"]["ptoken"] or ""
+                        ptoken = (
+                            request_result["data"]["ptoken"] if request_result else ""
+                        )
                         payload["ptoken"] = ptoken
                         payload["orderCreateUrl"] = (
                             "https://show.bilibili.com/api/ticket/order/createV2"
@@ -500,16 +557,6 @@ def buy_stream(
                     )
                     time.sleep(interval / 1000)
 
-                except RuntimeError as e:
-                    last_exc = e
-                    yield emit(
-                        "attempt",
-                        f"[{attempt}/{CREATE_RETRY_LIMIT}] {e}",
-                        attempt_current=attempt,
-                        attempt_total=CREATE_RETRY_LIMIT,
-                    )
-                    time.sleep(interval / 1000)
-
                 except Exception as e:
                     last_exc = e
                     yield emit(
@@ -524,7 +571,7 @@ def buy_stream(
                     yield emit("status", f"群友说👴： {get_random_fail_message()}")
                 yield emit(
                     "status",
-                    f"创建订单已重试 {CREATE_RETRY_LIMIT} 次，重新准备订单",
+                    None,
                     attempt_current=None,
                     attempt_total=CREATE_RETRY_LIMIT,
                 )
@@ -558,7 +605,7 @@ def buy_stream(
                 )
                 qrcode_url = get_qrcode_url(
                     _request,
-                    request_result["data"]["orderId"],
+                    request_result["data"]["orderId"],  # type: ignore
                 )
                 if show_qrcode:
                     qr_gen = qrcode.QRCode()
@@ -579,14 +626,7 @@ def buy_stream(
                 break
         except JSONDecodeError as e:
             yield emit("error", f"配置文件格式错误: {e}", status="failed")
-        except HTTPError as e:
-            logger.exception(e)
-            yield emit("error", f"请求错误: {e}")
-            for message in emit_proxy_failure_messages(
-                f"订单准备请求异常({e.__class__.__name__})"
-            ):
-                yield message
-        except RequestException as e:
+        except HTTPError | RequestException as e:
             logger.exception(e)
             yield emit("error", f"请求错误: {e}")
             for message in emit_proxy_failure_messages(
