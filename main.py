@@ -157,10 +157,16 @@ def main():
         help="Hide random message when fail.",
     )
     runtime.add_argument(
+        "--use_local_token",
+        action="store_true",
+        default=get_env_default("USE_LOCAL_TOKEN", False, str_to_bool),
+        help="Use locally generated token instead of prepare token when allowed.",
+    )
+    runtime.add_argument(
         "--use_local_ptoken",
         action="store_true",
         default=get_env_default("USE_LOCAL_PTOKEN", False, str_to_bool),
-        help="Skip prepare for hot projects and use locally inferred ptoken.",
+        help="Deprecated. Local ptoken is temporarily disabled; hot projects use server prepare.",
     )
 
     args = parser.parse_args()

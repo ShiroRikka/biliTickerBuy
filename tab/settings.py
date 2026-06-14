@@ -298,7 +298,9 @@ def on_submit_ticket_id(num):
             screen_id = screen["id"]
             current_project_id = screen["project_id"]
             express_fee = (
-                0 if data["has_eticket"] else max(screen.get("express_fee", 0), 0)
+                0
+                if data["has_eticket"]
+                else max(int(screen.get("express_fee", 0) or 0), 0)
             )
 
             for ticket in screen["ticket_list"]:
@@ -472,7 +474,10 @@ def upload_file(filepath):
         ]
         yield [
             gr.update(value=GLOBAL_COOKIE_PATH),
-            gr.update(choices=new_choices, value=new_choices[-1]),
+            gr.update(
+                choices=new_choices,
+                value=new_choices[-1] if new_choices else None,
+            ),
         ]
     except Exception as exc:
         logger.exception(exc)
@@ -554,21 +559,20 @@ def login_tab():
             return [f"{a.uid} - {a.name} (Lv{a.level})" for a in accounts]
 
         def _get_default_account_choice() -> str | None:
-            accounts = util.main_request.cookieManager.get_accounts()
-            if not accounts:
+            return _get_default_account_choice_from(_get_account_choices())
+
+        def _get_default_account_choice_from(choices: list[str]) -> str | None:
+            if not choices:
                 return None
 
             active_uid = util.main_request.cookieManager.get_cookies_value("DedeUserID")
             if active_uid is not None:
                 active_uid = str(active_uid)
-                for account in accounts:
-                    if account.uid == active_uid:
-                        return f"{account.uid} - {account.name} (Lv{account.level})"
+                for choice in choices:
+                    if _find_uid_from_choice(choice) == active_uid:
+                        return choice
 
-            first_account = accounts[0]
-            return (
-                f"{first_account.uid} - {first_account.name} (Lv{first_account.level})"
-            )
+            return choices[0]
 
         def _find_uid_from_choice(choice: str) -> str:
             if not choice:
@@ -610,10 +614,11 @@ def login_tab():
                     </div>
                     """
                 )
+                account_choices = _get_account_choices()
                 account_dropdown = gr.Dropdown(
                     label="当前账号",
-                    choices=_get_account_choices(),
-                    value=_get_default_account_choice,
+                    choices=account_choices,
+                    value=_get_default_account_choice_from(account_choices),
                     interactive=True,
                     allow_custom_value=False,
                     filterable=False,
@@ -669,7 +674,7 @@ def login_tab():
                         gr.update(visible=False),
                         gr.update(
                             choices=new_choices,
-                            value=_get_default_account_choice(),
+                            value=_get_default_account_choice_from(new_choices),
                         ),
                         gr.update(value=""),
                     ]
@@ -745,7 +750,7 @@ def login_tab():
                 gr.update(),
                 gr.update(
                     choices=new_choices,
-                    value=_get_default_account_choice(),
+                    value=_get_default_account_choice_from(new_choices),
                 ),
                 gr.update(),
             ]
@@ -936,7 +941,7 @@ def setting_tab():
                     for screen in screens:
                         screen_name = screen["name"]
                         screen_id = screen["id"]
-                        express_fee = int(screen.get("express_fee", 0))
+                        express_fee = max(int(screen.get("express_fee", 0) or 0), 0)
                         for ticket in screen["ticket_list"]:
                             ticket_price = int(ticket["price"]) + express_fee
                             ticket["price"] = ticket_price
