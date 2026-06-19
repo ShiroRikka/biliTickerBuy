@@ -77,7 +77,7 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          pip install pyinstaller~=5.13.2
+          pip install pyinstaller~=6.20.0
           pip install -r requirements.txt
 
       - name: Build PyInstaller
@@ -94,6 +94,11 @@ jobs:
           if [ "${{ matrix.config.os.filename }}" = "windows_amd64" ]; then
             cp dist/biliTickerBuy.exe "$RELEASE_DIR/biliTickerBuy.exe"
             cp assets/updater/update.bat "$RELEASE_DIR/update.bat"
+          elif [[ "${{ matrix.config.os.filename }}" == macos_* ]]; then
+            # Avoid duplicating the .app bundle before DMG creation.
+            mv dist/biliTickerBuy.app "$RELEASE_DIR/biliTickerBuy.app"
+            cp assets/updater/update.sh "$RELEASE_DIR/update.sh"
+            chmod +x "$RELEASE_DIR/update.sh"
           else
             cp dist/biliTickerBuy "$RELEASE_DIR/biliTickerBuy"
             cp assets/updater/update.sh "$RELEASE_DIR/update.sh"
@@ -115,12 +120,63 @@ jobs:
             -DestinationPath "./tmp.zip" `
             -Force
 
-      - name: Zip the Build-linux-macos
-        if: matrix.config.os.filename != 'windows_amd64'
+      - name: Zip the Build-linux
+        if: matrix.config.os.filename != 'windows_amd64' && !startsWith(matrix.config.os.filename, 'macos_')
         shell: bash
         run: |
           cd ./dist
           zip -r ../tmp.zip biliTickerBuy
+
+      - name: Zip the Build-macos-cli
+        if: startsWith(matrix.config.os.filename, 'macos_')
+        shell: bash
+        run: |
+          cd ./dist
+          zip -r ../tmp-macos-cli.zip biliTickerBuy
+
+      - name: Build DMG-macos
+        if: startsWith(matrix.config.os.filename, 'macos_')
+        shell: bash
+        run: |
+          APP_DIR="./release/biliTickerBuy"
+
+          echo "Disk usage before macOS DMG cleanup:"
+          df -h .
+          df -h /tmp || true
+          du -sh ./build ./dist ./release 2>/dev/null || true
+
+          # The CLI asset is already archived, so dist/build can be removed
+          # before DMG creation to lower peak disk usage on GitHub runners.
+          rm -rf ./dist ./build
+
+          echo "Disk usage after macOS DMG cleanup:"
+          df -h .
+          df -h /tmp || true
+          du -sh ./release 2>/dev/null || true
+
+          SOURCE_KB="$(du -sk "$APP_DIR" | awk '{print $1}')"
+          DMG_SIZE_MB="$(( (SOURCE_KB * 2 + 1024 * 200 + 1023) / 1024 ))"
+
+          echo "Source size: ${SOURCE_KB} KiB"
+          echo "Allocated DMG size: ${DMG_SIZE_MB} MiB"
+
+          # Build a writable image with explicit headroom first, then convert it
+          # to a compressed read-only DMG. This avoids hdiutil auto-sizing issues.
+          hdiutil create \
+            -volname "biliTickerBuy" \
+            -srcfolder "$APP_DIR" \
+            -ov \
+            -fs HFS+ \
+            -format UDRW \
+            -size "${DMG_SIZE_MB}m" \
+            "./tmp-rw.dmg"
+
+          hdiutil convert "./tmp-rw.dmg" \
+            -ov \
+            -format UDZO \
+            -o "./tmp.dmg"
+
+          rm -f ./tmp-rw.dmg
 
       - name: Prepare release bundle metadata
         shell: bash
@@ -129,12 +185,25 @@ jobs:
           RELEASE_ZIP_NAME: ${{ secrets.ReleaseZipName }}
           PLATFORM_KEY: ${{ matrix.config.os.filename }}
         run: |
-          ASSET_NAME="${RELEASE_ZIP_NAME}_${PLATFORM_KEY}_${DRAFT_TAG}.zip"
+          if [[ "${PLATFORM_KEY}" == macos_* ]]; then
+            ASSET_EXT="dmg"
+            SRC_ASSET="tmp.dmg"
+          else
+            ASSET_EXT="zip"
+            SRC_ASSET="tmp.zip"
+          fi
+
+          TMP_ASSET="tmp.${ASSET_EXT}"
+          if [[ "${SRC_ASSET}" != "${TMP_ASSET}" ]]; then
+            mv "${SRC_ASSET}" "${TMP_ASSET}"
+          fi
+
+          ASSET_NAME="${RELEASE_ZIP_NAME}_${PLATFORM_KEY}_${DRAFT_TAG}.${ASSET_EXT}"
 
           echo "Draft tag: ${DRAFT_TAG}"
           echo "Asset name: ${ASSET_NAME}"
 
-          mv tmp.zip "$ASSET_NAME"
+          mv "tmp.${ASSET_EXT}" "$ASSET_NAME"
 
           export ASSET_NAME
           python - <<'PY'
@@ -163,6 +232,57 @@ jobs:
           )
           PY
 
+      - name: Prepare extra macOS CLI asset
+        if: startsWith(matrix.config.os.filename, 'macos_')
+        shell: bash
+        env:
+          DRAFT_TAG: ${{ needs.update_release_draft.outputs.tag_name }}
+          RELEASE_ZIP_NAME: ${{ secrets.ReleaseZipName }}
+          PLATFORM_KEY: ${{ matrix.config.os.filename }}
+        run: |
+          EXTRA_ASSET_NAME="${RELEASE_ZIP_NAME}_${PLATFORM_KEY}_${DRAFT_TAG}_cli.zip"
+          mv tmp-macos-cli.zip "$EXTRA_ASSET_NAME"
+          echo "$EXTRA_ASSET_NAME" > extra-macos-asset-name.txt
+          export EXTRA_ASSET_NAME
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          metadata_path = Path("release-manifest-entry.json")
+          payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+          platform_key = os.environ["PLATFORM_KEY"]
+          platform_entry = payload[platform_key]
+
+          primary_asset = {
+              "name": platform_entry["name"],
+              "sha256": platform_entry["sha256"],
+              "size": platform_entry["size"],
+              "kind": "primary",
+          }
+
+          extra_asset_path = Path(os.environ["EXTRA_ASSET_NAME"])
+          digest = hashlib.sha256()
+          with extra_asset_path.open("rb") as fh:
+              for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                  if chunk:
+                      digest.update(chunk)
+
+          extra_asset = {
+              "name": extra_asset_path.name,
+              "sha256": digest.hexdigest(),
+              "size": extra_asset_path.stat().st_size,
+              "kind": "cli",
+          }
+
+          platform_entry["assets"] = [primary_asset, extra_asset]
+          metadata_path.write_text(
+              json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
       - name: Upload binaries to draft release
         shell: bash
         env:
@@ -171,6 +291,10 @@ jobs:
         run: |
           ASSET_NAME="$(python -c "import json; print(json.load(open('release-manifest-entry.json', encoding='utf-8')).popitem()[1]['name'])")"
           gh release upload "$DRAFT_TAG" "$ASSET_NAME" --clobber
+          if [ -f extra-macos-asset-name.txt ]; then
+            EXTRA_ASSET_NAME="$(cat extra-macos-asset-name.txt)"
+            gh release upload "$DRAFT_TAG" "$EXTRA_ASSET_NAME" --clobber
+          fi
 
       - name: Upload manifest inputs
         uses: actions/upload-artifact@v4
@@ -178,6 +302,7 @@ jobs:
           name: release-manifest-${{ matrix.config.os.filename }}
           path: |
             *.zip
+            *.dmg
             release-manifest-entry.json
           if-no-files-found: error
 
