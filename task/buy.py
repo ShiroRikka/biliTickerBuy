@@ -351,11 +351,22 @@ def buy_stream(config: BuyConfig):
         if bool(payload["hotProject"]) and not is_hot_project:
             is_hot_project = True
             tickets_info["is_hot_project"] = True
+        _request._invalidate_h2_client()
+
         _request.prewarm_h2_connection(f"{base_url}/")
         return messages
 
     for warm_message in refresh_hot_and_warm():
         yield emit("status", warm_message)
+
+    yield emit(
+        "proxy",
+        f"当前代理: {_request.current_proxy_status()}",
+        BuyStreamUpdate(
+            current_proxy=_request.current_proxy_status(),
+            proxy_pool=_request.proxy_pool_status(),
+        ),
+    )
 
     for wait_state in _wait_until_start(
         config.time_start,
@@ -380,15 +391,6 @@ def buy_stream(config: BuyConfig):
                 ),
             ),
         )
-    yield emit(
-        "proxy",
-        f"当前代理: {_request.current_proxy_status()}",
-        BuyStreamUpdate(
-            current_proxy=_request.current_proxy_status(),
-            proxy_pool=_request.proxy_pool_status(),
-        ),
-    )
-
     while isRunning:
         try:
             request_result: dict | None = None
@@ -481,6 +483,7 @@ def buy_stream(config: BuyConfig):
                     if not isRunning:
                         yield emit("status", "抢票结束")
                         break
+                    should_sleep_before_next_attempt = False
                     try:
                         create_response = _request.post(
                             url=url,
@@ -541,7 +544,7 @@ def buy_stream(config: BuyConfig):
                                 ),
                             )
                             tickets_info["pay_money"] = ret["data"]["pay_money"]
-                        time.sleep(request_interval / 1000)
+                        should_sleep_before_next_attempt = True
                     except JSONDecodeError as exc:
                         handled_412 = yield from handle_non_json_response(
                             "创建订单接口",
@@ -596,7 +599,8 @@ def buy_stream(config: BuyConfig):
                         or terminal_result is not None
                     ):
                         break
-                    time.sleep(request_interval / 1000)
+                    if should_sleep_before_next_attempt:
+                        time.sleep(request_interval / 1000)
 
                 if (
                     result is not None
